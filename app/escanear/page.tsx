@@ -3,6 +3,7 @@
 import {
   useState,
   useEffect,
+  useMemo,
   useRef,
   useCallback,
   type ChangeEvent,
@@ -71,6 +72,18 @@ interface Tarjeta {
   tienePinGuardado: boolean;
 }
 
+interface Prestamo {
+  tipoRecurso: string;
+  vehiculoId: number | null;
+  estado: string;
+}
+
+interface RecursoDisponible {
+  id: number;
+  descripcion: string;
+  detalle?: string | null;
+}
+
 // Una foto capturada, pendiente de enviar (el ticket puede componerse de
 // varias fotos — p.ej. tickets largos partidos en 2+ fotos).
 interface CapturedImage {
@@ -133,6 +146,14 @@ function vehiculoKey(cat: Categoria): string {
 }
 
 const CENTRO_KEY = "centro-coste";
+
+// Fila especial dentro del listado de "Vehiculo" que abre el selector de
+// vehiculo de sustitucion — id negativo para no colisionar con ids reales.
+const SUSTITUCION_SENTINEL_ID = -1;
+
+// Fila especial dentro del selector de vehiculo de sustitucion que abre el
+// formulario para dar de alta una matricula que no esta en la flota.
+const NUEVO_VEHICULO_SENTINEL_ID = -2;
 
 // ─── OCR preview → EditableLinea conversion ───────────────────────────────────
 
@@ -525,14 +546,106 @@ function ImagePreviewStep({
   );
 }
 
+// ─── Alta de vehículo nuevo (vehículo de sustitución fuera de la flota) ───────
+
+function NuevoVehiculoSheet({
+  open,
+  onClose,
+  onSubmit,
+  isPending,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSubmit: (datos: { matricula: string; descripcion: string }) => void;
+  isPending: boolean;
+}) {
+  const [matricula, setMatricula] = useState("");
+  const [descripcion, setDescripcion] = useState("");
+
+  useEffect(() => {
+    if (open) {
+      setMatricula("");
+      setDescripcion("");
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = "";
+      };
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  return (
+    <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex flex-col justify-end">
+      <div className="absolute inset-0 bg-black/50 animate-in fade-in duration-200" onClick={onClose} />
+      <div className="relative flex flex-col gap-4 rounded-t-2xl bg-card p-4 pb-safe shadow-2xl animate-in slide-in-from-bottom duration-250 ease-out">
+        <div className="flex justify-center">
+          <div className="h-1 w-10 rounded-full bg-muted-foreground/30" />
+        </div>
+        <div>
+          <p className="text-base font-bold text-foreground">Añadir vehículo nuevo</p>
+          <p className="text-xs text-muted-foreground">
+            Para un vehículo que no está en la flota (alquiler, prestado...). Queda marcado para que el gestor lo revise.
+          </p>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Matrícula*
+          </p>
+          <input
+            autoFocus
+            value={matricula}
+            onChange={(e) => setMatricula(e.target.value.toUpperCase())}
+            placeholder="Ej: 1234-ABC"
+            className="h-12 rounded-xl border border-border bg-input px-4 text-sm font-mono tracking-widest text-foreground placeholder:font-sans placeholder:tracking-normal placeholder:text-muted-foreground outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Marca / alias (opcional)
+          </p>
+          <input
+            value={descripcion}
+            onChange={(e) => setDescripcion(e.target.value)}
+            placeholder="Ej: Ford Transit, alquiler findes"
+            className="h-12 rounded-xl border border-border bg-input px-4 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
+          />
+        </div>
+        <button
+          type="button"
+          disabled={!matricula.trim() || isPending}
+          onClick={() => onSubmit({ matricula: matricula.trim(), descripcion: descripcion.trim() })}
+          className="flex h-12 items-center justify-center gap-2 rounded-xl bg-primary text-sm font-bold text-primary-foreground shadow-md shadow-primary/30 transition-all disabled:pointer-events-none disabled:opacity-50"
+        >
+          {isPending ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            "Dar de alta y asignar"
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Vehicle / Centro / Tarjeta trigger + item renders ────────────────────────
+
+function SustitucionBadge() {
+  return (
+    <span className="w-fit shrink-0 rounded-full border border-warning/30 bg-warning/15 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-warning">
+      Sustitución
+    </span>
+  );
+}
 
 function VehiculoTrigger({
   vehiculo,
   categoria,
+  esSustitucion,
 }: {
   vehiculo: Vehiculo | null;
   categoria: Categoria;
+  esSustitucion?: boolean;
 }) {
   if (!vehiculo) {
     return (
@@ -566,9 +679,12 @@ function VehiculoTrigger({
         )}
       </div>
       <div className="min-w-0">
-        <p className="font-mono text-sm font-bold tracking-widest text-foreground">
-          {identifier}
-        </p>
+        <div className="flex items-center gap-1.5">
+          <p className="font-mono text-sm font-bold tracking-widest text-foreground">
+            {identifier}
+          </p>
+          {esSustitucion && <SustitucionBadge />}
+        </div>
         {vehiculo.nombre && (
           <p className="truncate text-xs text-muted-foreground">
             {vehiculo.nombre}
@@ -583,10 +699,12 @@ function VehiculoItem({
   vehiculo,
   categoria,
   isSelected,
+  esSustitucion,
 }: {
   vehiculo: Vehiculo;
   categoria: Categoria;
   isSelected: boolean;
+  esSustitucion?: boolean;
 }) {
   const identifier =
     categoria === "VEHICULO"
@@ -618,9 +736,12 @@ function VehiculoItem({
         )}
       </div>
       <div className="min-w-0 flex-1">
-        <p className="font-mono text-sm font-bold tracking-widest text-foreground">
-          {identifier}
-        </p>
+        <div className="flex items-center gap-1.5">
+          <p className="font-mono text-sm font-bold tracking-widest text-foreground">
+            {identifier}
+          </p>
+          {esSustitucion && <SustitucionBadge />}
+        </div>
         {vehiculo.nombre && (
           <p className="truncate text-xs text-muted-foreground">
             {vehiculo.nombre}
@@ -743,13 +864,115 @@ function AssignmentStep({
   onBack: () => void;
   onContinue: () => void;
 }) {
-  const { data: vehiculos = [] } = useQuery<Vehiculo[]>({
+  const { data: vehiculosTodos = [], refetch: refetchVehiculosTodos } = useQuery<Vehiculo[]>({
     queryKey: ["vehiculos", assignState.categoria],
     queryFn: () =>
       apiClient.get<Vehiculo[]>(
         `/vehiculos?activo=true&categoria=${assignState.categoria}`,
       ),
   });
+
+  const { data: prestamos = [], refetch: refetchPrestamos } = useQuery<Prestamo[]>({
+    queryKey: ["mis-prestamos"],
+    queryFn: () => apiClient.get<Prestamo[]>("/prestamos/mis-prestamos"),
+  });
+
+  // Vehiculos DISPONIBLE que el operario puede auto-asignarse cuando le dan
+  // uno de sustitucion y no aparece en su lista de prestamos activos. Queda
+  // marcado como creadoPorCampo=true para que el gestor lo revise despues.
+  const { data: vehiculosDisponibles = [], refetch: refetchVehiculosDisponibles } = useQuery<RecursoDisponible[]>({
+    queryKey: ["recursos-disponibles", "VEHICULO"],
+    queryFn: () =>
+      apiClient.get<RecursoDisponible[]>(
+        "/prestamos/recursos-disponibles?tipo=VEHICULO",
+      ),
+    enabled: assignState.categoria === "VEHICULO",
+  });
+
+  const [sustitucionAsignada, setSustitucionAsignada] = useState<RecursoDisponible | null>(null);
+  const [sustitucionSheetOpen, setSustitucionSheetOpen] = useState(false);
+  const [nuevoVehiculoFormOpen, setNuevoVehiculoFormOpen] = useState(false);
+
+  const asignarSustitucionMutation = useMutation({
+    mutationFn: (recurso: RecursoDisponible) =>
+      apiClient.post<Prestamo>("/prestamos/mis-prestamos", {
+        tipoRecurso: "VEHICULO",
+        vehiculoId: recurso.id,
+        centroCosteId: assignState.centroCosteId,
+        fechaInicio: new Date().toISOString().slice(0, 19),
+      }),
+    onSuccess: async (_data, recurso) => {
+      await Promise.all([
+        refetchPrestamos(),
+        refetchVehiculosTodos(),
+        refetchVehiculosDisponibles(),
+      ]);
+      setAssignState((s) => ({ ...s, vehiculoId: recurso.id }));
+      setSustitucionAsignada(recurso);
+      toast.success(`Vehículo ${recurso.descripcion} asignado`);
+    },
+    onError: (err) => {
+      toast.error(
+        err instanceof ApiError ? err.message : "No se pudo asignar el vehículo",
+      );
+    },
+  });
+
+  // Alta de un vehiculo que no esta en la flota (p.ej. alquiler o prestado de
+  // un tercero): primero lo registra (queda pendiente de revision del gestor)
+  // y despues se autoasigna el prestamo igual que con uno ya existente.
+  const crearYAsignarVehiculoMutation = useMutation({
+    mutationFn: async (datos: { matricula: string; descripcion: string }) => {
+      const nuevo = await apiClient.post<{ id: number; matricula: string }>(
+        "/vehiculos/mios",
+        datos,
+      );
+      await apiClient.post<Prestamo>("/prestamos/mis-prestamos", {
+        tipoRecurso: "VEHICULO",
+        vehiculoId: nuevo.id,
+        centroCosteId: assignState.centroCosteId,
+        fechaInicio: new Date().toISOString().slice(0, 19),
+      });
+      return nuevo;
+    },
+    onSuccess: async (nuevo) => {
+      await Promise.all([
+        refetchPrestamos(),
+        refetchVehiculosTodos(),
+        refetchVehiculosDisponibles(),
+      ]);
+      setAssignState((s) => ({ ...s, vehiculoId: nuevo.id }));
+      setSustitucionAsignada({ id: nuevo.id, descripcion: nuevo.matricula });
+      setNuevoVehiculoFormOpen(false);
+      toast.success(`Vehículo ${nuevo.matricula} dado de alta y asignado`);
+    },
+    onError: (err) => {
+      toast.error(
+        err instanceof ApiError ? err.message : "No se pudo dar de alta el vehículo",
+      );
+    },
+  });
+
+  // Solo los vehiculos con un prestamo de recurso VEHICULO activo (o vencido
+  // sin devolver) para el operario — antes se mostraba el listado completo.
+  const vehiculosAsignadosIds = useMemo(
+    () =>
+      new Set(
+        prestamos
+          .filter(
+            (p) =>
+              p.tipoRecurso === "VEHICULO" &&
+              (p.estado === "ACTIVO" || p.estado === "VENCIDO"),
+          )
+          .map((p) => p.vehiculoId),
+      ),
+    [prestamos],
+  );
+
+  const vehiculos = useMemo(
+    () => vehiculosTodos.filter((v) => vehiculosAsignadosIds.has(v.id)),
+    [vehiculosTodos, vehiculosAsignadosIds],
+  );
 
   const { data: centros = [] } = useQuery<CentroCoste[]>({
     queryKey: ["centros-coste"],
@@ -859,14 +1082,33 @@ function AssignmentStep({
               : "Selecciona maquinaria"
           }
           value={selectedVehiculo}
-          onChange={(v) =>
+          onChange={(v) => {
+            if (v.id === SUSTITUCION_SENTINEL_ID) {
+              if (!assignState.centroCosteId) {
+                toast.error("Selecciona antes un centro de coste");
+                return;
+              }
+              setSustitucionSheetOpen(true);
+              return;
+            }
             setAssignState((s) => ({
               ...s,
               vehiculoId: v.id,
               centroCosteId: v.centroCosteId ?? s.centroCosteId,
-            }))
+            }));
+          }}
+          items={
+            assignState.categoria === "VEHICULO"
+              ? [
+                  ...vehiculos,
+                  {
+                    id: SUSTITUCION_SENTINEL_ID,
+                    nombre: "Vehículo de sustitución",
+                    categoria: assignState.categoria,
+                  },
+                ]
+              : vehiculos
           }
-          items={vehiculos}
           emptyMessage={
             assignState.categoria === "VEHICULO"
               ? "No hay vehículos disponibles"
@@ -879,20 +1121,38 @@ function AssignmentStep({
           }
           getKey={(v) => v.id}
           getSearchText={(v) =>
-            [v.matricula, v.codigoObra, v.nombre].filter(Boolean).join(" ")
+            v.id === SUSTITUCION_SENTINEL_ID
+              ? "vehiculo sustitucion sustituto"
+              : [v.matricula, v.codigoObra, v.nombre].filter(Boolean).join(" ")
           }
           recentItems={recentVehiculos}
           recentLabel="Últimos usados"
           renderTrigger={(v) => (
-            <VehiculoTrigger vehiculo={v} categoria={assignState.categoria} />
-          )}
-          renderItem={(v, isSelected) => (
-            <VehiculoItem
+            <VehiculoTrigger
               vehiculo={v}
               categoria={assignState.categoria}
-              isSelected={isSelected}
+              esSustitucion={v?.id === sustitucionAsignada?.id}
             />
           )}
+          renderItem={(v, isSelected) =>
+            v.id === SUSTITUCION_SENTINEL_ID ? (
+              <div className="flex flex-1 items-center gap-3">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-dashed border-border">
+                  <Plus className="size-4 text-muted-foreground" />
+                </div>
+                <span className="text-sm font-medium text-foreground">
+                  Vehículo de sustitución
+                </span>
+              </div>
+            ) : (
+              <VehiculoItem
+                vehiculo={v}
+                categoria={assignState.categoria}
+                isSelected={isSelected}
+                esSustitucion={v.id === sustitucionAsignada?.id}
+              />
+            )
+          }
         />
 
         {/* Centro de coste */}
@@ -915,6 +1175,69 @@ function AssignmentStep({
             <CentroItem centro={c} isSelected={isSelected} />
           )}
         />
+
+        {/* Vehículo de sustitución — sin fila propia, se abre desde la fila
+            especial del listado de "Vehículo" de arriba */}
+        {assignState.categoria === "VEHICULO" && (
+          <SearchableSheetSelect<RecursoDisponible>
+            title="Selecciona vehículo de sustitución"
+            value={null}
+            onChange={(r) => {
+              if (r.id === NUEVO_VEHICULO_SENTINEL_ID) {
+                setNuevoVehiculoFormOpen(true);
+                return;
+              }
+              asignarSustitucionMutation.mutate(r);
+            }}
+            items={[
+              ...vehiculosDisponibles,
+              { id: NUEVO_VEHICULO_SENTINEL_ID, descripcion: "+ Añadir vehículo nuevo" },
+            ]}
+            disabled={asignarSustitucionMutation.isPending}
+            hideTrigger
+            autoOpen={sustitucionSheetOpen}
+            onAutoOpened={() => setSustitucionSheetOpen(false)}
+            emptyMessage="No hay vehículos disponibles para asignar"
+            searchPlaceholder="Buscar por matrícula..."
+            getKey={(r) => r.id}
+            getSearchText={(r) =>
+              r.id === NUEVO_VEHICULO_SENTINEL_ID
+                ? "añadir vehiculo nuevo alquiler sustitucion"
+                : [r.descripcion, r.detalle].filter(Boolean).join(" ")
+            }
+            renderTrigger={() => null}
+            renderItem={(r) =>
+              r.id === NUEVO_VEHICULO_SENTINEL_ID ? (
+                <div className="flex flex-1 items-center gap-3">
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-dashed border-border">
+                    <Plus className="size-4 text-muted-foreground" />
+                  </div>
+                  <span className="text-sm font-medium text-foreground">
+                    Añadir vehículo nuevo (no está en la flota)
+                  </span>
+                </div>
+              ) : (
+                <div className="flex flex-col">
+                  <span className="font-mono text-sm font-bold tracking-widest text-foreground">
+                    {r.descripcion}
+                  </span>
+                  {r.detalle && (
+                    <span className="text-xs text-muted-foreground">{r.detalle}</span>
+                  )}
+                </div>
+              )
+            }
+          />
+        )}
+
+        {assignState.categoria === "VEHICULO" && (
+          <NuevoVehiculoSheet
+            open={nuevoVehiculoFormOpen}
+            onClose={() => setNuevoVehiculoFormOpen(false)}
+            onSubmit={(datos) => crearYAsignarVehiculoMutation.mutate(datos)}
+            isPending={crearYAsignarVehiculoMutation.isPending}
+          />
+        )}
 
         {/* Tarjeta */}
         {tarjetas.length === 1 ? (
